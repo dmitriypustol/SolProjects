@@ -1,4 +1,4 @@
-# SolProjects
+# ERC20 Staking Contract
 ERC20 Staking Contract
 Overview
 This Solidity smart contract implements a secure staking mechanism where users can stake one ERC20 token to earn rewards in another ERC20 token. The contract features:
