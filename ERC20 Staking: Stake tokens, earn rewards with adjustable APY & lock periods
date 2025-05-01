@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract StakingContract is Ownable {
+    using SafeERC20 for IERC20;
+
+    // ============ STATE VARIABLES ============
+    IERC20 public immutable stakingToken;
+    IERC20 public immutable rewardToken;
+    
+    uint256 public totalStaked;
+    uint256 public apy; // 1000 = 10%
+    uint256 public lockPeriod = 30 days;
+    bool public emergencyStop = false;
+
+    struct Staker {
+        uint256 amount;
+        uint256 rewardDebt;
+        uint256 lastUpdate;
+        uint256 unlockTime;
+    }
+
+    mapping(address => Staker) public stakers;
+
+    // ============ EVENTS ============
+    event Staked(address indexed user, uint256 amount);
+    event Withdrawn(address indexed user, uint256 amount);
+    event RewardClaimed(address indexed user, uint256 amount);
+    event EmergencyWithdrawn(address indexed user, uint256 amount);
+    event APYUpdated(uint256 newAPY);
+    event LockPeriodUpdated(uint256 newLockPeriod);
+    event EmergencyStopActivated(bool status);
+
+    // ============ MODIFIERS ============
+    modifier updateReward(address user) {
+        Staker storage staker = stakers[user];
+        if (staker.amount > 0) {
+            uint256 earned = _calculateReward(user);
+            staker.rewardDebt += earned;
+        }
+        staker.lastUpdate = block.timestamp;
+        _;
+    }
+
+    modifier notEmergency() {
+        require(!emergencyStop, "Contract is in emergency stop");
+        _;
+    }
+
+    // ============ CONSTRUCTOR ============
+    constructor(address _stakingToken, address _rewardToken, uint256 _apy) {
+        require(_stakingToken != address(0), "Staking token: zero address");
+        require(_rewardToken != address(0), "Reward token: zero address");
+        stakingToken = IERC20(_stakingToken);
+        rewardToken = IERC20(_rewardToken);
+        apy = _apy;
+        _transferOwnership(msg.sender);
+    }
+
+    // ============ USER FUNCTIONS ============
+    function stake(uint256 amount) external notEmergency updateReward(msg.sender) {
+        require(amount > 0, "Cannot stake zero");
+        Staker storage staker = stakers[msg.sender];
+        stakingToken.safeTransferFrom(msg.sender, address(this), amount);
+        
+        staker.amount += amount;
+        if (staker.unlockTime == 0 || block.timestamp > staker.unlockTime) {
+            staker.unlockTime = block.timestamp + lockPeriod;
+        }
+        totalStaked += amount;
+        emit Staked(msg.sender, amount);
+    }
+
+    function withdraw(uint256 amount) external notEmergency updateReward(msg.sender) {
+        Staker storage staker = stakers[msg.sender];
+        require(amount > 0, "Cannot withdraw zero");
+        require(staker.amount >= amount, "Insufficient staked");
+        require(block.timestamp >= staker.unlockTime, "Tokens are locked");
+        
+        staker.amount -= amount;
+        totalStaked -= amount;
+        stakingToken.safeTransfer(msg.sender, amount);
+        emit Withdrawn(msg.sender, amount);
+    }
+
+    function claimRewards() external notEmergency updateReward(msg.sender) {
+        uint256 reward = stakers[msg.sender].rewardDebt;
+        require(reward > 0, "No rewards");
+        require(rewardToken.balanceOf(address(this)) >= reward, "Insufficient reward tokens");
+        
+        stakers[msg.sender].rewardDebt = 0;
+        rewardToken.safeTransfer(msg.sender, reward);
+        emit RewardClaimed(msg.sender, reward);
+    }
+
+    function emergencyWithdraw() external {
+        require(emergencyStop, "Not in emergency");
+        Staker storage staker = stakers[msg.sender];
+        uint256 amount = staker.amount;
+        require(amount > 0, "Nothing to withdraw");
+        
+        staker.amount = 0;
+        staker.rewardDebt = 0;
+        totalStaked -= amount;
+        stakingToken.safeTransfer(msg.sender, amount);
+        emit EmergencyWithdrawn(msg.sender, amount);
+    }
+
+    // ============ ADMIN FUNCTIONS ============
+    function setAPY(uint256 _apy) external onlyOwner {
+        require(_apy <= 10000, "APY too high");
+        apy = _apy;
+        emit APYUpdated(_apy);
+    }
+
+    function setLockPeriod(uint256 _lockPeriod) external onlyOwner {
+        require(_lockPeriod <= 365 days, "Lock period too long");
+        lockPeriod = _lockPeriod;
+        emit LockPeriodUpdated(_lockPeriod);
+    }
+
+    function withdrawRewardTokens(uint256 amount) external onlyOwner {
+        rewardToken.safeTransfer(owner(), amount);
+    }
+
+    function setEmergencyStop(bool _status) external onlyOwner {
+        emergencyStop = _status;
+        emit EmergencyStopActivated(_status);
+    }
+
+    // ============ VIEW FUNCTIONS ============
+    function _calculateReward(address user) internal view returns (uint256) {
+        Staker memory staker = stakers[user];
+        if (staker.amount == 0) return 0;
+        uint256 duration = block.timestamp - staker.lastUpdate;
+        return (staker.amount * apy * duration) / (10000 * 365 days);
+    }
+
+    function pendingReward(address user) public view returns (uint256) {
+        return stakers[user].rewardDebt + _calculateReward(user);
+    }
+
+    function userInfo(address user) external view returns (
+        uint256 staked,
+        uint256 rewards,
+        uint256 unlockTime
+    ) {
+        Staker memory staker = stakers[user];
+        return (
+            staker.amount,
+            pendingReward(user),
+            staker.unlockTime
+        );
+    }
+}
